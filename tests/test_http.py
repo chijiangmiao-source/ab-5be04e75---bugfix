@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import threading
 import urllib.error
 import urllib.request
@@ -11,6 +12,11 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from app import AuditHandler
+from tests.scenarios import (
+    assert_family_result,
+    make_family_payload,
+    result_signature,
+)
 
 
 @pytest.fixture()
@@ -68,6 +74,26 @@ def test_audit_error_shape_has_no_audit_fields(server):
     assert status == 400
     assert set(body.keys()) == {"errors"}
     assert body["errors"][0]["field"] == "/candidates/0/right_endpoint"
+
+
+def test_audit_sparse_family_and_order_invariance(server):
+    # 真实 HTTP 接口重复检查顺序无关性：原始顺序与多种打乱结果逐字段一致，
+    # 且响应中的规范弧逐对不存在交叉。
+    payload = make_family_payload()
+    status, baseline = request(server, "POST", "/audit", payload)
+    assert status == 200
+    assert_family_result(baseline)
+
+    for seed in range(4):
+        rng = random.Random(seed)
+        shuffled = payload["candidates"][:]
+        rng.shuffle(shuffled)
+        status, body = request(
+            server, "POST", "/audit", {"hits": payload["hits"], "candidates": shuffled}
+        )
+        assert status == 200
+        assert_family_result(body)
+        assert result_signature(body) == result_signature(baseline)
 
 
 def test_bad_json(server):

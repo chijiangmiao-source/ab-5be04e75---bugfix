@@ -180,6 +180,40 @@ def run_smoke() -> None:
     )
     check(ok, "非法引用返回字段路径错误且无审计结果", f"HTTP {status} {body}")
 
+    # 场景 5：大批稀疏候选的全局几何约束 —— 交叉的廉价弧不得共同入选，
+    # 结果与录入顺序无关。直接复用代码测试中的场景与断言。
+    from tests.scenarios import (
+        assert_family_result,
+        make_family_payload,
+        result_signature,
+    )
+
+    family = make_family_payload()
+    status, body = http_request("POST", "/audit", family)
+    family_ok = False
+    if status == 200:
+        try:
+            assert_family_result(body)
+            family_ok = True
+        except AssertionError as exc:
+            print(f"候选族断言失败: {exc}")
+    check(family_ok, "稀疏候选族全局几何约束（配对4/残差10/两方案/规范解/归属）",
+          f"HTTP {status}")
+
+    import random
+
+    rng = random.Random(7)
+    shuffled = family["candidates"][:]
+    rng.shuffle(shuffled)
+    status, reordered = http_request(
+        "POST", "/audit", {"hits": family["hits"], "candidates": shuffled}
+    )
+    check(
+        status == 200 and result_signature(reordered) == result_signature(body),
+        "真实 HTTP 接口候选录入顺序无关性",
+        f"HTTP {status}",
+    )
+
     # 附加：重复端点对、位置冲突、规模越界。
     status, body = http_request(
         "POST",

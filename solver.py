@@ -10,19 +10,20 @@
 
 算法采用区间 inside DP（求最优目标、方案数、规范序列）与 outside DP
 （inside-outside，统计每条候选对出现在多少个最优方案中）。
-所有计数使用 Python 任意精度整数；区间 DP 复杂度 O(n*|C| + n^3)，
+非交叉约束由 inside 规则天然保证：弧 (i,k) 的内部 [i+1,k) 与外部 [k+1,j)
+独立求解，任何与之交叉的弧都无法同时出现，因此不需要按连通分量拆分——
+拆分会丢失跨分量的全局几何约束。
+所有计数使用 Python 任意精度整数；区间 DP 复杂度 O(n*|C| + n^2)，
 n <= 180、|C| <= 4000。
 """
 
 from __future__ import annotations
 
-import math
 from typing import Any, Optional
 
 MIN_HITS = 4
 MAX_HITS = 180
 MAX_CANDIDATES = 4000
-COMPONENT_THRESHOLD = 48
 
 
 class ValidationError(Exception):
@@ -176,126 +177,10 @@ def _validate(
     return hits, candidate_records
 
 
-def _candidate_components(
-    candidates: list[tuple[str, int, int, int]],
-) -> list[list[tuple[str, int, int, int]]]:
-    if len(candidates) < COMPONENT_THRESHOLD:
-        return [candidates]
-
-    parent: dict[int, int] = {}
-
-    def find(node: int) -> int:
-        parent.setdefault(node, node)
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
-        return node
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
-
-    for _cid, left, right, _residual in candidates:
-        union(left, right)
-
-    endpoint_groups: dict[int, list[tuple[str, int, int, int]]] = {}
-    for candidate in candidates:
-        endpoint_groups.setdefault(find(candidate[1]), []).append(candidate)
-
-    groups = list(endpoint_groups.values())
-    spans = [
-        (
-            min(min(candidate[1], candidate[2]) for candidate in group),
-            max(max(candidate[1], candidate[2]) for candidate in group),
-        )
-        for group in groups
-    ]
-    group_parent = list(range(len(groups)))
-
-    def group_find(index: int) -> int:
-        while group_parent[index] != index:
-            group_parent[index] = group_parent[group_parent[index]]
-            index = group_parent[index]
-        return index
-
-    for left_index, (left_start, left_end) in enumerate(spans):
-        for right_index in range(left_index + 1, len(spans)):
-            right_start, right_end = spans[right_index]
-            interleaves = (
-                left_start < right_start < left_end < right_end
-                or right_start < left_start < right_end < left_end
-            )
-            if interleaves:
-                left_root = group_find(left_index)
-                right_root = group_find(right_index)
-                if left_root != right_root:
-                    group_parent[right_root] = left_root
-
-    merged: dict[int, list[tuple[str, int, int, int]]] = {}
-    for index, group in enumerate(groups):
-        merged.setdefault(group_find(index), []).extend(group)
-    return list(merged.values())
-
-
-def _audit_components(
-    hits: list[dict[str, Any]],
-    groups: list[list[tuple[str, int, int, int]]],
-) -> dict[str, Any]:
-    results: list[dict[str, Any]] = []
-    for group in groups:
-        payload = {
-            "hits": hits,
-            "candidates": [
-                {
-                    "id": cid,
-                    "left_endpoint": hits[left]["id"],
-                    "right_endpoint": hits[right]["id"],
-                    "residual": residual,
-                }
-                for cid, left, right, residual in group
-            ],
-        }
-        results.append(audit(payload))
-
-    hit_position = {hit["id"]: index for index, hit in enumerate(hits)}
-    canonical_pairs = [
-        pair for result in results for pair in result["canonical_pairs"]
-    ]
-    canonical_pairs.sort(key=lambda pair: hit_position[pair["left_endpoint"]])
-    matched = {
-        endpoint
-        for pair in canonical_pairs
-        for endpoint in (pair["left_endpoint"], pair["right_endpoint"])
-    }
-
-    classification = {"required": [], "optional": [], "never": []}
-    for result in results:
-        for label in classification:
-            classification[label].extend(result["classification"][label])
-
-    return {
-        "optimal_count": str(
-            math.prod(int(result["optimal_count"]) for result in results)
-        ),
-        "paired_hits": sum(result["paired_hits"] for result in results),
-        "total_residual": sum(result["total_residual"] for result in results),
-        "canonical_pairs": canonical_pairs,
-        "unmatched_hits": [hit["id"] for hit in hits if hit["id"] not in matched],
-        "classification": {
-            label: sorted(ids) for label, ids in classification.items()
-        },
-    }
-
-
 def audit(payload: Any) -> dict[str, Any]:
     """执行完整审计，返回可直接 JSON 序列化的结果。"""
 
     hits, candidates = _validate(payload)
-    components = _candidate_components(candidates)
-    if len(components) > 1:
-        return _audit_components(hits, components)
     n = len(hits)
 
     # arcs[i]: 以位置 i 为左端点的候选 (右端点, 残差, id)。

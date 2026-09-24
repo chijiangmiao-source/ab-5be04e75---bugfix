@@ -10,6 +10,13 @@ import pytest
 from solver import MAX_CANDIDATES, MAX_HITS, MIN_HITS, ValidationError, audit
 
 from tests.brute import brute_solve
+from tests.scenarios import (
+    N_HITS,
+    assert_canonical_pairs_noncrossing,
+    assert_family_result,
+    make_family_payload,
+    result_signature,
+)
 
 
 def make_hits(n, prefix="h"):
@@ -163,6 +170,91 @@ def test_unmatched_reported():
     candidates = [cand("m", "h1", "h4", 0)]
     res = audit({"hits": hits, "candidates": candidates})
     assert res["unmatched_hits"] == ["h0", "h2", "h3", "h5"]
+
+
+# ------------------------------------------- 大批稀疏候选的全局几何约束
+
+
+def test_sparse_family_global_geometry():
+    # 72 击中 / 50 候选：a-cross(0-30,残差0) 与 y-cross(10-49,残差0)
+    # 满足 0 < 10 < 30 < 49，绘制后交叉，不能同时入选。正确最优为
+    # 配对 4、总残差 10、恰好两种最优方案，规范解选 a-cross + b-short。
+    payload = make_family_payload()
+    assert len(payload["hits"]) == N_HITS
+    assert len(payload["candidates"]) == 50
+    res = audit(payload)
+    assert_family_result(res)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_sparse_family_order_independence(seed):
+    # 调整候选录入顺序不得改变目标值、方案数、规范解、未配对集合与归属。
+    payload = make_family_payload()
+    baseline = audit(payload)
+    rng = random.Random(seed)
+    shuffled = payload["candidates"][:]
+    rng.shuffle(shuffled)
+    reordered = audit({"hits": payload["hits"], "candidates": shuffled})
+    assert result_signature(reordered) == result_signature(baseline)
+    assert_family_result(reordered)
+
+
+def test_sparse_family_both_optima_noncrossing():
+    # 两种最优方案分别为 {a-cross,b-short} 与 {z-outer,y-cross}，
+    # 逐对验证二者的弧都不交叉；交叉组合 {a-cross,y-cross} 残差虽为 0
+    # 却不是合法径迹解释。
+    payload = make_family_payload()
+    res = audit(payload)
+
+    def pairs_of(ids):
+        by_id = {c["id"]: c for c in payload["candidates"]}
+        return [by_id[cid] for cid in ids]
+
+    for ids in (["a-cross", "b-short"], ["y-cross", "z-outer"]):
+        assert_canonical_pairs_noncrossing(pairs_of(ids))
+
+    a = next(p for p in res["canonical_pairs"] if p["id"] == "a-cross")
+    assert a["left_endpoint"] == "h0" and a["right_endpoint"] == "h30"
+    # 交叉的廉价组合绝不能成为规范解。
+    assert [p["id"] for p in res["canonical_pairs"]] != ["a-cross", "y-cross"]
+
+
+def test_dense_candidates_past_threshold_match_bruteforce():
+    # 56 条候选跨过旧的 48 条分解阈值：组件 A（11 个端点、55 条全连弧）
+    # 的跨度包含组件 B 的独立弧 (3,7)，但 A 的弧 (0,5) 与 B 交叉。
+    # 旧实现按跨度包含关系不合并组件，会把交叉弧各自取局部最优后笛卡尔合并。
+    n = 13
+    isolated = {3, 7}
+    group_a = [k for k in range(n) if k not in isolated]
+    arcs = []
+    for i, left in enumerate(group_a):
+        for right in group_a[i + 1 :]:
+            residual = 0 if (left, right) == (0, 5) else 50
+            arcs.append((f"A-{left}-{right}", left, right, residual))
+    arcs.append(("B-cross", 3, 7, 0))
+    assert len(arcs) > 48
+
+    hits = make_hits(n)
+    payload = {
+        "hits": hits,
+        "candidates": [
+            cand(cid, f"h{left}", f"h{right}", residual)
+            for cid, left, right, residual in arcs
+        ],
+    }
+    res = audit(payload)
+    ref = brute_solve(n, arcs)
+
+    assert int(res["optimal_count"]) == ref["optimal_count"]
+    assert res["paired_hits"] == 2 * ref["max_pairs"]
+    assert res["total_residual"] == ref["min_cost"]
+    assert [p["id"] for p in res["canonical_pairs"]] == ref["canonical"]
+    assert res["classification"] == ref["classification"]
+    # 交叉的诱饵弧与 B 弧不得共同出现在规范解中。
+    assert not (
+        {"A-0-5", "B-cross"} <= {p["id"] for p in res["canonical_pairs"]}
+    )
+    assert_canonical_pairs_noncrossing(res["canonical_pairs"])
 
 
 # ---------------------------------------------------------------- 校验错误
