@@ -179,6 +179,14 @@ def _validate(
 def _candidate_components(
     candidates: list[tuple[str, int, int, int]],
 ) -> list[list[tuple[str, int, int, int]]]:
+    """把候选划分为互相独立的连通分量（仅在大批量时启用的分治优化）。
+
+    正确性不变量：不同分量的跨度必须两两不交。只有跨度互不相交时，
+    分量间才既不可能交叉、也不可能嵌套，目标（对数、残差、方案数）才可加、
+    规范序列才可按位置拼接。因此端点连通的组之间只要跨度相交——无论
+    交错（交叉）还是包含（嵌套）——都必须合并；仅检查交错会把内层组
+    误判为独立，丢失跨组的全局非交叉约束。
+    """
     if len(candidates) < COMPONENT_THRESHOLD:
         return [candidates]
 
@@ -223,11 +231,9 @@ def _candidate_components(
     for left_index, (left_start, left_end) in enumerate(spans):
         for right_index in range(left_index + 1, len(spans)):
             right_start, right_end = spans[right_index]
-            interleaves = (
-                left_start < right_start < left_end < right_end
-                or right_start < left_start < right_end < left_end
-            )
-            if interleaves:
+            # 跨度相交即相关：交错会交叉，包含会嵌套，二者都破坏独立性。
+            overlaps = left_start < right_end and right_start < left_end
+            if overlaps:
                 left_root = group_find(left_index)
                 right_root = group_find(right_index)
                 if left_root != right_root:

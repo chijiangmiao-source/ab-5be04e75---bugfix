@@ -10,6 +10,7 @@ import pytest
 from solver import MAX_CANDIDATES, MAX_HITS, MIN_HITS, ValidationError, audit
 
 from tests.brute import brute_solve
+from tests.family import KEY_IDS, crossing_pairs, sparse_bait_family
 
 
 def make_hits(n, prefix="h"):
@@ -163,6 +164,48 @@ def test_unmatched_reported():
     candidates = [cand("m", "h1", "h4", 0)]
     res = audit({"hits": hits, "candidates": candidates})
     assert res["unmatched_hits"] == ["h0", "h2", "h3", "h5"]
+
+
+# ---------------------------------------------------------------- 稀疏候选族回归
+
+
+def test_sparse_candidates_keep_global_geometry():
+    # 50 条稀疏候选触发分量划分；嵌套跨度不得被误判为相互独立，
+    # 否则交叉的 a-cross (0,30) 与 y-cross (10,49) 会被同时接受。
+    payload = sparse_bait_family()
+    assert len(payload["candidates"]) == 50
+    res = audit(payload)
+    # 精确目标：4 个击中、最小总残差 10、恰两个最优方案。
+    assert res["paired_hits"] == 4
+    assert res["total_residual"] == 10
+    assert res["optimal_count"] == "2"
+    # 规范解为 a-cross + b-short（字典序先于 z-outer + y-cross）。
+    assert [p["id"] for p in res["canonical_pairs"]] == ["a-cross", "b-short"]
+    # 规范弧两两不交叉。
+    assert crossing_pairs(res["canonical_pairs"], payload["hits"]) == []
+    # 未配对集合：除 h0、h10、h20、h30 外的全部击中。
+    matched = {"h0", "h10", "h20", "h30"}
+    assert res["unmatched_hits"] == [
+        h["id"] for h in payload["hits"] if h["id"] not in matched
+    ]
+    # 三类归属：四条关键弧均可选，46 条填充弧从不出现，必选为空。
+    cls = res["classification"]
+    assert cls["required"] == []
+    assert cls["optional"] == ["a-cross", "b-short", "y-cross", "z-outer"]
+    assert cls["never"] == sorted(
+        c["id"] for c in payload["candidates"] if c["id"] not in KEY_IDS
+    )
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_sparse_candidates_order_independent(seed):
+    # 调整候选录入顺序不得改变任何结论。
+    payload = sparse_bait_family()
+    baseline = audit(payload)
+    shuffled = dict(payload)
+    shuffled["candidates"] = payload["candidates"][:]
+    random.Random(seed).shuffle(shuffled["candidates"])
+    assert audit(shuffled) == baseline
 
 
 # ---------------------------------------------------------------- 校验错误

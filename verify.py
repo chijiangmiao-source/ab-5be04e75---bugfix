@@ -3,16 +3,19 @@
 依次执行：
 1. 代码测试（pytest 单元测试，含随机暴力交叉验证）；
 2. 构建检查（语法编译、模块导入、镜像内关键文件齐备）；
-3. API/HTTP 冒烟（健康路径 + 嵌套同优、交叉低价诱饵、空候选、非法引用四类场景）。
+3. API/HTTP 冒烟（健康路径 + 嵌套同优、交叉低价诱饵、空候选、非法引用、
+   稀疏候选族全局几何与顺序无关性等场景）。
 
 任一步失败即以非零退出码结束，全部通过退出码 0。
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import py_compile
+import random
 import sys
 import urllib.error
 import urllib.request
@@ -106,6 +109,31 @@ def cand(cid, a, b, r):
         "right_endpoint": f"h{b}",
         "residual": r,
     }
+
+
+def sparse_bait_family():
+    """72 击中、50 条候选的稀疏族：四条关键弧 + 46 条残差 100 填充弧。"""
+    family_hits = [{"id": f"h{k}", "position": k} for k in range(72)]
+    candidates = [
+        cand("a-cross", 0, 30, 0),
+        cand("z-outer", 0, 70, 10),
+        cand("b-short", 10, 20, 10),
+        cand("y-cross", 10, 49, 0),
+    ]
+    candidates += [cand(f"f0-{b}", 0, b, 100) for b in range(50, 70)]
+    candidates += [
+        cand(f"f10-{b}", 10, b, 100) for b in list(range(21, 30)) + list(range(31, 48))
+    ]
+    return {"hits": family_hits, "candidates": candidates}
+
+
+def has_crossing(canonical_pairs, family_hits):
+    pos = {h["id"]: h["position"] for h in family_hits}
+    spans = [(pos[p["left_endpoint"]], pos[p["right_endpoint"]]) for p in canonical_pairs]
+    return any(
+        a < c < b < d or c < a < d < b
+        for (a, b), (c, d) in itertools.combinations(spans, 2)
+    )
 
 
 def run_smoke() -> None:
@@ -211,6 +239,39 @@ def run_smoke() -> None:
     # 未知路径返回 404。
     status, _ = http_request("GET", "/nope")
     check(status == 404, "未知路径返回 404", f"HTTP {status}")
+
+    # 场景 5：大批稀疏候选族 —— 全局非交叉约束不得因分量划分而丢失。
+    # 交叉的 a-cross (0,30) 与 y-cross (10,49) 不得同时入选；
+    # 正确结果：4 击中、残差 10、恰 2 个最优方案，规范解 a-cross + b-short。
+    payload = sparse_bait_family()
+    status, body = http_request("POST", "/audit", payload)
+    canonical = body.get("canonical_pairs", [])
+    ok = (
+        status == 200
+        and body["paired_hits"] == 4
+        and body["total_residual"] == 10
+        and body["optimal_count"] == "2"
+        and [p["id"] for p in canonical] == ["a-cross", "b-short"]
+        and not has_crossing(canonical, payload["hits"])
+        and len(body["unmatched_hits"]) == 68
+        and body["classification"]["required"] == []
+        and set(body["classification"]["optional"])
+        == {"a-cross", "z-outer", "b-short", "y-cross"}
+        and len(body["classification"]["never"]) == 46
+    )
+    check(ok, "稀疏候选族保持全局非交叉约束", f"HTTP {status} {body}")
+
+    # 场景 6：顺序无关性 —— 真实 HTTP 接口上多次打乱候选录入顺序，
+    # 响应必须与基准逐字段一致。
+    rng = random.Random(99)
+    consistent = True
+    for _ in range(3):
+        shuffled = {"hits": payload["hits"], "candidates": payload["candidates"][:]}
+        rng.shuffle(shuffled["candidates"])
+        other_status, other = http_request("POST", "/audit", shuffled)
+        if other_status != 200 or other != body:
+            consistent = False
+    check(consistent, "候选录入顺序无关（HTTP 重复检查）")
 
 
 def main() -> int:

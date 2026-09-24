@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import threading
 import urllib.error
 import urllib.request
@@ -11,6 +12,8 @@ from http.server import ThreadingHTTPServer
 import pytest
 
 from app import AuditHandler
+
+from tests.family import crossing_pairs, sparse_bait_family
 
 
 @pytest.fixture()
@@ -83,3 +86,36 @@ def test_bad_json(server):
 def test_unknown_route(server):
     status, _ = request(server, "GET", "/")
     assert status == 404
+
+
+def test_sparse_family_over_http_order_independent(server):
+    # 50 条稀疏候选族：全局非交叉约束在真实 HTTP 接口上同样成立，
+    # 且多次调整候选录入顺序（含逆序）响应逐字节一致。
+    payload = sparse_bait_family()
+    status, baseline = request(server, "POST", "/audit", payload)
+    assert status == 200
+    assert baseline["paired_hits"] == 4
+    assert baseline["total_residual"] == 10
+    assert baseline["optimal_count"] == "2"
+    assert [p["id"] for p in baseline["canonical_pairs"]] == ["a-cross", "b-short"]
+    assert crossing_pairs(baseline["canonical_pairs"], payload["hits"]) == []
+    assert baseline["classification"]["required"] == []
+    assert set(baseline["classification"]["optional"]) == {
+        "a-cross",
+        "z-outer",
+        "b-short",
+        "y-cross",
+    }
+
+    orders = [list(reversed(payload["candidates"]))]
+    rng = random.Random(20260924)
+    for _ in range(4):
+        shuffled = payload["candidates"][:]
+        rng.shuffle(shuffled)
+        orders.append(shuffled)
+    for candidates in orders:
+        status, body = request(
+            server, "POST", "/audit", {"hits": payload["hits"], "candidates": candidates}
+        )
+        assert status == 200
+        assert body == baseline
